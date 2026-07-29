@@ -28,6 +28,14 @@ from src.core.yawn_detector import YawnDetector
 from src.utils.constants import ALERT_COOLDOWN_SECONDS, ALERT_LOG_PATH, ASSETS_DIR
 from src.utils.logger import AlertLogger
 
+# How often (in seconds) the beep/voice repeats while an alert condition
+# (drowsy / yawning / distracted) stays continuously true.
+ALERT_REPEAT_SECONDS = 1.5
+
+# Alert types that should also say "Please focus on driving" out loud,
+# matching the desktop app's voice message.
+SPOKEN_ALERTS = {"DROWSINESS", "DISTRACTION"}
+
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
@@ -70,17 +78,20 @@ class WebAlertManager:
         self.shared_alert_state = shared_alert_state
 
     def trigger(self, alert_type: str, message: str) -> bool:
-        if alert_type in self.active_alerts:
-            return False
-
         now = time.time()
         previous_time = self.last_alert_times.get(alert_type, 0)
-        if now - previous_time < ALERT_COOLDOWN_SECONDS:
+
+        # First time this alert becomes active: log it once to CSV.
+        if alert_type not in self.active_alerts:
+            self.active_alerts.add(alert_type)
+            self.logger.log(alert_type, message)
+
+        # Re-fire the sound/voice repeatedly (every ALERT_REPEAT_SECONDS)
+        # for as long as the condition stays true, instead of only once.
+        if now - previous_time < ALERT_REPEAT_SECONDS:
             return False
 
         self.last_alert_times[alert_type] = now
-        self.active_alerts.add(alert_type)
-        self.logger.log(alert_type, message)
         self.shared_alert_state.set_alert(alert_type)
         return True
 
@@ -250,18 +261,46 @@ st.caption(
 
 audio_placeholder = st.empty()
 
-if webrtc_ctx.state.playing and BEEP_BASE64:
+VOICE_MESSAGE = "Please focus on driving"
+
+if webrtc_ctx.state.playing:
     while webrtc_ctx.state.playing:
         alert_type = shared_alert_state.pop_alert()
         if alert_type:
             nonce = str(time.time())
-            audio_placeholder.markdown(
-                f"""
+
+            beep_html = ""
+            if BEEP_BASE64:
+                beep_html = f"""
                 <audio autoplay="true" style="display:none">
                     <source src="data:audio/wav;base64,{BEEP_BASE64}" type="audio/wav">
                 </audio>
+                """
+
+            speak_js = ""
+            if alert_type in SPOKEN_ALERTS:
+                # Uses the visitor's own browser text-to-speech engine, so
+                # it works on any device (desktop or phone) with no audio
+                # file and no server-side speakers required.
+                speak_js = f"""
+                <script>
+                    (function() {{
+                        try {{
+                            const msg = new SpeechSynthesisUtterance({VOICE_MESSAGE!r});
+                            msg.rate = 1.0;
+                            window.speechSynthesis.cancel();
+                            window.speechSynthesis.speak(msg);
+                        }} catch (e) {{ console.error("TTS failed", e); }}
+                    }})();
+                </script>
+                """
+
+            audio_placeholder.markdown(
+                f"""
+                {beep_html}
+                {speak_js}
                 <!-- {nonce} -->
                 """,
                 unsafe_allow_html=True,
             )
-        time.sleep(0.4)
+        time.sleep(0.3)
