@@ -30,18 +30,18 @@ FRAME_HEIGHT = 540
 
 # Drowsiness settings
 EAR_THRESHOLD = 0.23
-DROWSY_SECONDS_LIMIT = 8.0
+DROWSY_SECONDS_LIMIT = 4.0
 
 
 # Yawning settings
 MAR_THRESHOLD = 0.60
-YAWN_SECONDS_LIMIT = 8.0
+YAWN_SECONDS_LIMIT = 4.0
 
 
 # Distraction settings
 HEAD_YAW_THRESHOLD = 35.0
 HEAD_PITCH_THRESHOLD = 25.0
-DISTRACTION_SECONDS_LIMIT = 8.0
+DISTRACTION_SECONDS_LIMIT = 4.0
 
 
 # Alert cooldown prevents the same alert being logged every single frame.
