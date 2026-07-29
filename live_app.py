@@ -19,6 +19,7 @@ import time
 import av
 import cv2
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_webrtc import RTCConfiguration, VideoProcessorBase, WebRtcMode, webrtc_streamer
 
 from src.core.distraction_detector import DistractionDetector
@@ -263,44 +264,53 @@ audio_placeholder = st.empty()
 
 VOICE_MESSAGE = "Please focus on driving"
 
+
+def _alert_html(alert_type: str, nonce: str) -> str:
+    """Builds a tiny standalone HTML page (beep + spoken message) to run
+    inside components.html's iframe, where <script> tags actually execute
+    (unlike st.markdown, which silently strips/ignores <script> tags)."""
+    beep_tag = ""
+    if BEEP_BASE64:
+        beep_tag = f"""
+        <audio autoplay="true">
+            <source src="data:audio/wav;base64,{BEEP_BASE64}" type="audio/wav">
+        </audio>
+        """
+
+    speak_script = ""
+    if alert_type in SPOKEN_ALERTS:
+        speak_script = f"""
+        <script>
+            try {{
+                var msg = new SpeechSynthesisUtterance({VOICE_MESSAGE!r});
+                msg.rate = 1.0;
+                window.speechSynthesis.cancel();
+                window.speechSynthesis.speak(msg);
+            }} catch (e) {{}}
+        </script>
+        """
+
+    return f"<!-- {nonce} -->{beep_tag}{speak_script}"
+
+
+# Browsers require ONE real click on the page before they allow any
+# automatic sound/voice later on. This button "unlocks" audio + speech
+# for the rest of the session — click it once after pressing START.
+if st.button("🔔 Enable Sound Alerts (click once)"):
+    with audio_placeholder.container():
+        components.html(
+            _alert_html("DISTRACTION", "unlock-" + str(time.time())),
+            height=0,
+        )
+    st.success("Sound enabled. Alerts will now beep and speak automatically.")
+
 if webrtc_ctx.state.playing:
     while webrtc_ctx.state.playing:
         alert_type = shared_alert_state.pop_alert()
         if alert_type:
-            nonce = str(time.time())
-
-            beep_html = ""
-            if BEEP_BASE64:
-                beep_html = f"""
-                <audio autoplay="true" style="display:none">
-                    <source src="data:audio/wav;base64,{BEEP_BASE64}" type="audio/wav">
-                </audio>
-                """
-
-            speak_js = ""
-            if alert_type in SPOKEN_ALERTS:
-                # Uses the visitor's own browser text-to-speech engine, so
-                # it works on any device (desktop or phone) with no audio
-                # file and no server-side speakers required.
-                speak_js = f"""
-                <script>
-                    (function() {{
-                        try {{
-                            const msg = new SpeechSynthesisUtterance({VOICE_MESSAGE!r});
-                            msg.rate = 1.0;
-                            window.speechSynthesis.cancel();
-                            window.speechSynthesis.speak(msg);
-                        }} catch (e) {{ console.error("TTS failed", e); }}
-                    }})();
-                </script>
-                """
-
-            audio_placeholder.markdown(
-                f"""
-                {beep_html}
-                {speak_js}
-                <!-- {nonce} -->
-                """,
-                unsafe_allow_html=True,
-            )
+            with audio_placeholder.container():
+                components.html(
+                    _alert_html(alert_type, str(time.time())),
+                    height=0,
+                )
         time.sleep(0.3)
