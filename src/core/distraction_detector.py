@@ -12,12 +12,6 @@ from src.utils.constants import (
     HEAD_YAW_THRESHOLD,
 )
 
-# How many seconds of frames to average at the start to learn this
-# person's own natural "looking forward" angle (their real resting head
-# position, e.g. slightly tilted down toward a book/laptop), instead of
-# assuming 0 degrees always means "facing the camera dead-on."
-CALIBRATION_SECONDS = 2.0
-
 
 class DistractionDetector:
     """Estimates head direction and checks if looking away lasts several seconds."""
@@ -33,14 +27,6 @@ class DistractionDetector:
         self.seconds_limit = seconds_limit
         self.distracted_frames = 0
         self.distracted_started_at = None
-
-        # Calibration state: collect early readings to find this person's
-        # natural neutral pitch/yaw, then compare future frames to that.
-        self._calibration_started_at = None
-        self._calibration_samples: list[tuple[float, float]] = []
-        self.baseline_pitch = 0.0
-        self.baseline_yaw = 0.0
-        self.is_calibrated = False
 
     def _image_point(self, landmarks, index: int, width: int, height: int) -> list[float]:
         landmark = landmarks[index]
@@ -102,32 +88,8 @@ class DistractionDetector:
         projection_matrix = np.hstack((rotation_matrix, translation_vector))
         _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(projection_matrix)
 
-        raw_pitch = float(euler_angles[0][0])
-        raw_yaw = float(euler_angles[1][0])
-
-        # --- Calibration phase ---
-        # For the first couple of seconds, just record readings to learn
-        # this person's own natural resting head angle (their real
-        # "looking forward" pose, e.g. slightly tilted down at a book or
-        # laptop). We don't judge distraction yet during this phase.
-        if not self.is_calibrated:
-            if self._calibration_started_at is None:
-                self._calibration_started_at = time.time()
-
-            self._calibration_samples.append((raw_pitch, raw_yaw))
-
-            if time.time() - self._calibration_started_at >= CALIBRATION_SECONDS:
-                pitches = [sample[0] for sample in self._calibration_samples]
-                yaws = [sample[1] for sample in self._calibration_samples]
-                self.baseline_pitch = sum(pitches) / len(pitches)
-                self.baseline_yaw = sum(yaws) / len(yaws)
-                self.is_calibrated = True
-
-            return self._result(raw_pitch, raw_yaw, "CALIBRATING", 0.0, False)
-
-        # --- Normal detection, relative to this person's own baseline ---
-        pitch = raw_pitch - self.baseline_pitch
-        yaw = raw_yaw - self.baseline_yaw
+        pitch = float(euler_angles[0][0])
+        yaw = float(euler_angles[1][0])
         direction = "CENTER"
 
         if yaw < -self.yaw_threshold:
