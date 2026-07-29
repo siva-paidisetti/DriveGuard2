@@ -24,6 +24,14 @@ def read_alerts(log_path: Path) -> list[dict]:
         return list(csv.DictReader(file))
 
 
+def delete_alerts(log_path: Path) -> None:
+    """Clears all logged alerts, keeping just the CSV header row so future
+    alerts still get logged correctly."""
+    with log_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(["timestamp", "alert_type", "message"])
+
+
 def main() -> None:
     st.set_page_config(page_title="DriveGuard Dashboard", page_icon="DG", layout="wide")
     st.title("DriveGuard Dashboard")
@@ -47,6 +55,28 @@ def main() -> None:
     st.subheader("Alert History")
     if alerts:
         st.dataframe(alerts, use_container_width=True)
+
+        st.divider()
+        if "confirm_clear" not in st.session_state:
+            st.session_state["confirm_clear"] = False
+
+        if not st.session_state["confirm_clear"]:
+            if st.button("🗑️ Clear Alert History"):
+                st.session_state["confirm_clear"] = True
+                st.rerun()
+        else:
+            st.warning("This will permanently delete all logged alerts. Are you sure?")
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button("✅ Yes, delete everything", type="primary"):
+                    delete_alerts(ALERT_LOG_PATH)
+                    st.session_state["confirm_clear"] = False
+                    st.success("Alert history cleared.")
+                    st.rerun()
+            with cancel_col:
+                if st.button("Cancel"):
+                    st.session_state["confirm_clear"] = False
+                    st.rerun()
     else:
         st.write("Alert history is empty.")
 
