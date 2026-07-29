@@ -2,10 +2,18 @@
 
 Runs the same detection logic (EAR, MAR, head pose) but takes video from the
 visitor's own browser webcam via streamlit-webrtc, instead of a local OpenCV
-window. This is the file to point Streamlit Cloud at for a real, shareable
-live-detection link.
+window.
+
+v2 changes:
+- Plays a real alert sound in the visitor's browser (not the server) using a
+  small shared, thread-safe flag between the video-processing thread and the
+  main Streamlit script.
+- Skips per-point face-mesh drawing (very expensive on a CPU-only server) and
+  lowers the requested camera resolution, to remove the lag/freeze feeling.
 """
 
+import base64
+import threading
 import time
 
 import av
@@ -17,27 +25,49 @@ from src.core.distraction_detector import DistractionDetector
 from src.core.drowsiness_detector import DrowsinessDetector
 from src.core.face_mesh_detector import FaceMeshDetector
 from src.core.yawn_detector import YawnDetector
-from src.utils.constants import ALERT_COOLDOWN_SECONDS, ALERT_LOG_PATH
+from src.utils.constants import ALERT_COOLDOWN_SECONDS, ALERT_LOG_PATH, ASSETS_DIR
 from src.utils.logger import AlertLogger
 
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
+BEEP_PATH = ASSETS_DIR / "beep.wav"
+BEEP_BASE64 = None
+if BEEP_PATH.exists():
+    BEEP_BASE64 = base64.b64encode(BEEP_PATH.read_bytes()).decode("ascii")
 
-class WebAlertManager:
-    """Browser-safe alert manager.
 
-    Unlike the desktop AlertManager, this never tries to play a local sound
-    or speak through PowerShell — that would run on the SERVER, not on the
-    visitor's computer, so it would be pointless. This version only logs
-    alerts to CSV and lets the video overlay show the warning text.
-    """
+class SharedAlertState:
+    """Thread-safe flag used to pass 'an alert just fired' from the video
+    processing thread (no Streamlit access) to the main script thread
+    (which can render an autoplay <audio> tag in the browser)."""
 
     def __init__(self):
+        self._lock = threading.Lock()
+        self._pending = None
+
+    def set_alert(self, alert_type: str) -> None:
+        with self._lock:
+            self._pending = alert_type
+
+    def pop_alert(self):
+        with self._lock:
+            alert = self._pending
+            self._pending = None
+            return alert
+
+
+class WebAlertManager:
+    """Browser-safe alert manager: logs to CSV and marks the shared flag so
+    the main script can play a sound. Never tries local sound/PowerShell
+    (that would run on the server, not the visitor's computer)."""
+
+    def __init__(self, shared_alert_state: SharedAlertState):
         self.logger = AlertLogger(ALERT_LOG_PATH)
         self.last_alert_times: dict[str, float] = {}
         self.active_alerts: set[str] = set()
+        self.shared_alert_state = shared_alert_state
 
     def trigger(self, alert_type: str, message: str) -> bool:
         if alert_type in self.active_alerts:
@@ -51,6 +81,7 @@ class WebAlertManager:
         self.last_alert_times[alert_type] = now
         self.active_alerts.add(alert_type)
         self.logger.log(alert_type, message)
+        self.shared_alert_state.set_alert(alert_type)
         return True
 
     def clear(self, alert_type: str) -> None:
@@ -62,14 +93,19 @@ def _draw_text(frame, text: str, position: tuple[int, int], color: tuple[int, in
 
 
 class DriveGuardProcessor(VideoProcessorBase):
-    """Runs one video frame at a time through the same detectors as main.py."""
+    """Runs each video frame through the same detectors as main.py.
 
-    def __init__(self):
+    Detection runs on every frame (needed for accurate timing), but the
+    expensive per-point face-mesh drawing has been removed to keep this
+    fast enough for a shared CPU-only cloud server.
+    """
+
+    def __init__(self, shared_alert_state: SharedAlertState):
         self.face_detector = FaceMeshDetector()
         self.drowsiness_detector = DrowsinessDetector()
         self.yawn_detector = YawnDetector()
         self.distraction_detector = DistractionDetector()
-        self.alert_manager = WebAlertManager()
+        self.alert_manager = WebAlertManager(shared_alert_state)
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -82,7 +118,7 @@ class DriveGuardProcessor(VideoProcessorBase):
 
         if results.multi_face_landmarks:
             face_landmarks = results.multi_face_landmarks[0]
-            self.face_detector.draw_landmarks(img, face_landmarks)
+            # Note: dense landmark drawing intentionally skipped for speed.
 
             drowsy_result = self.drowsiness_detector.check(face_landmarks, img.shape)
             yawn_result = self.yawn_detector.check(face_landmarks, img.shape)
@@ -134,26 +170,98 @@ class DriveGuardProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
-st.set_page_config(page_title="DriveGuard Live", layout="wide")
+st.set_page_config(page_title="DriveGuard Live", page_icon="🚗", layout="wide")
 
-st.title("DriveGuard — Live Detection")
-st.write(
-    "Click **Start** below and allow camera access. Detection runs live, "
-    "right here in your browser — eye closure, yawning, and head-turn "
-    "distraction are all monitored in real time."
+BACKGROUND_CSS = """
+<style>
+[data-testid="stAppViewContainer"] {
+    background: radial-gradient(circle at 15% 20%, rgba(0,217,192,0.15), transparent 40%),
+                radial-gradient(circle at 85% 80%, rgba(0,140,255,0.12), transparent 45%),
+                #0B0F19;
+}
+</style>
+"""
+st.markdown(BACKGROUND_CSS, unsafe_allow_html=True)
+
+st.markdown(
+    """
+    <div style="padding: 6px 0 0 0;">
+        <span style="background-color:#00D9C0; color:#0B0F19; padding:4px 12px;
+        border-radius:20px; font-weight:700; font-size:12px; letter-spacing:1px;">
+        ● LIVE</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-webrtc_streamer(
+st.title("🚗 DriveGuard — Live Detection")
+st.write(
+    "Real-time driver monitoring, running directly in your browser. "
+    "Click **Start**, allow camera access, and DriveGuard will watch for "
+    "signs of drowsiness, yawning, and distraction as they happen."
+)
+
+feature_1, feature_2, feature_3 = st.columns(3)
+with feature_1:
+    st.info("👁️ **Drowsiness**\n\nTracks eye closure using Eye Aspect Ratio (EAR).")
+with feature_2:
+    st.info("🥱 **Yawning**\n\nTracks mouth opening using Mouth Aspect Ratio (MAR).")
+with feature_3:
+    st.info("↔️ **Distraction**\n\nTracks head turns using head-pose estimation.")
+
+if not BEEP_BASE64:
+    st.warning(
+        "Alert sound file not found at assets/beep.wav — "
+        "alerts will still show visually, just without sound.",
+        icon="🔇",
+    )
+
+st.divider()
+
+if "alert_state" not in st.session_state:
+    st.session_state["alert_state"] = SharedAlertState()
+shared_alert_state = st.session_state["alert_state"]
+
+
+def _make_processor():
+    return DriveGuardProcessor(shared_alert_state)
+
+
+webrtc_ctx = webrtc_streamer(
     key="driveguard-live",
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
-    video_processor_factory=DriveGuardProcessor,
-    media_stream_constraints={"video": True, "audio": False},
+    video_processor_factory=_make_processor,
+    media_stream_constraints={
+        "video": {
+            "width": {"ideal": 480},
+            "height": {"ideal": 360},
+            "frameRate": {"ideal": 15, "max": 20},
+        },
+        "audio": False,
+    },
     async_processing=True,
 )
 
 st.caption(
-    "Note: alerts here are visual only (no sound), since this runs in your "
-    "browser rather than on your local machine. All alerts are still logged "
-    "and visible on the DriveGuard Dashboard."
+    "Tip: performance depends on your internet connection and the free "
+    "server's available CPU — lower resolution keeps it responsive."
 )
+
+audio_placeholder = st.empty()
+
+if webrtc_ctx.state.playing and BEEP_BASE64:
+    while webrtc_ctx.state.playing:
+        alert_type = shared_alert_state.pop_alert()
+        if alert_type:
+            nonce = str(time.time())
+            audio_placeholder.markdown(
+                f"""
+                <audio autoplay="true" style="display:none">
+                    <source src="data:audio/wav;base64,{BEEP_BASE64}" type="audio/wav">
+                </audio>
+                <!-- {nonce} -->
+                """,
+                unsafe_allow_html=True,
+            )
+        time.sleep(0.4)
