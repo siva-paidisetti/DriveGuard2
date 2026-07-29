@@ -35,7 +35,7 @@ ALERT_REPEAT_SECONDS = 1.5
 
 # Alert types that should also say "Please focus on driving" out loud,
 # matching the desktop app's voice message.
-SPOKEN_ALERTS = {"DROWSINESS", "DISTRACTION"}
+SPOKEN_ALERTS = {"DROWSINESS", "YAWNING", "DISTRACTION"}
 
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
